@@ -1,0 +1,33 @@
+[project]
+name = "tile-harvester"
+version = "0.1.0"
+description = "Tool to harvest and analyze satellite imagery for specific locations"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "requests",
+    "geojson",
+    "airtable",
+    "shapely",
+    "python-dotenv",
+    "pyproj"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pip-tools",
+    "pytest",
+    "black",
+    "isort"
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[project.scripts]
+tile-harvester = "tile_harvester.main:main"
