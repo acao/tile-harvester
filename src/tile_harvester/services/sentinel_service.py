@@ -12,7 +12,6 @@ import json
 from ..config import (
     COPERNICUS_USER,
     COPERNICUS_PASSWORD,
-    MAX_CLOUD_COVERAGE,
     TEMPORAL_WINDOW_DAYS,
     DATA_DIR
 )
@@ -112,7 +111,7 @@ const sRGB = (c) => c <= 0.0031308 ? (12.92 * c) : (1.055 * Math.pow(c, 0.416666
                 'Authorization': f"Bearer {token_data['access_token']}",
                 'Accept': 'application/json',
                 'Origin': 'https://browser.dataspace.copernicus.eu',
-                'Accept-CRS': 'EPSG:4326,EPSG:3857'
+                'Accept-CRS': 'EPSG:4326'
             })
             
             logger.debug("Successfully refreshed access token")
@@ -121,36 +120,29 @@ const sRGB = (c) => c <= 0.0031308 ? (12.92 * c) : (1.055 * Math.pow(c, 0.416666
             logger.error(f"Error getting access token: {str(e)}")
             raise
 
-    @staticmethod
-    @lru_cache(maxsize=None)
-    def _create_transformer():
-        """Create a cached coordinate transformer."""
-        return pyproj.Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
-
-    def _create_bbox(self, lon: float, lat: float, buffer_km: float = 0.3) -> Dict[str, Any]:
+    def _create_bbox(self, lon: float, lat: float, buffer_deg: float = 0.003) -> Dict[str, Any]:
         """
-        Create a bounding box around a point in EPSG:3857.
+        Create a bounding box around a point in EPSG:4326 (WGS84).
         
         Args:
             lon: Longitude of the point
             lat: Latitude of the point
-            buffer_km: Buffer size in kilometers
+            buffer_deg: Buffer size in degrees
             
         Returns:
-            Dictionary with bbox in EPSG:3857 format
+            Dictionary with bbox in EPSG:4326 format
         """
-        # Convert coordinates to Web Mercator for metric calculations
-        transformer = self._create_transformer()
-        x, y = transformer.transform(lon, lat)
-        
-        # Create buffer in meters
-        buffer_m = buffer_km * 1000
-        bbox = box(x - buffer_m, y - buffer_m, x + buffer_m, y + buffer_m)
+        bbox = box(
+            lon - buffer_deg,
+            lat - buffer_deg,
+            lon + buffer_deg,
+            lat + buffer_deg
+        )
         bounds = bbox.bounds
         
         return {
             "properties": {
-                "crs": "http://www.opengis.net/def/crs/EPSG/0/3857"
+                "crs": "http://www.opengis.net/def/crs/EPSG/0/4326"
             },
             "bbox": list(bounds)
         }
@@ -171,6 +163,7 @@ const sRGB = (c) => c <= 0.0031308 ? (12.92 * c) : (1.055 * Math.pow(c, 0.416666
         lon: float,
         lat: float,
         target_date: datetime,
+        event_id: str,
         width: int = 512,
         height: int = 512
     ) -> Optional[Path]:
@@ -181,6 +174,7 @@ const sRGB = (c) => c <= 0.0031308 ? (12.92 * c) : (1.055 * Math.pow(c, 0.416666
             lon: Longitude of the point
             lat: Latitude of the point
             target_date: Target date for imagery
+            event_id: The UW prefixed ID from source data
             width: Output image width
             height: Output image height
             
@@ -263,8 +257,8 @@ const sRGB = (c) => c <= 0.0031308 ? (12.92 * c) : (1.055 * Math.pow(c, 0.416666
                 logger.error(f"Unexpected content type: {content_type}")
                 return None
             
-            # Save the processed image
-            file_path = self.data_dir / f"sentinel_{target_date.strftime('%Y%m%d')}_{lon:.6f}_{lat:.6f}.png"
+            # Save the processed image with event ID in filename
+            file_path = self.data_dir / f"{event_id}_{target_date.strftime('%Y%m%d')}.jpg"
             
             with open(file_path, 'wb') as f:
                 f.write(response.content)
@@ -292,7 +286,7 @@ const sRGB = (c) => c <= 0.0031308 ? (12.92 * c) : (1.055 * Math.pow(c, 0.416666
             Path to the processed image file
         """
         try:
-            # Extract coordinates
+            # Extract coordinates and event ID
             geometry = feature.get('geometry', {})
             if geometry.get('type') != 'Point':
                 logger.warning("Feature geometry is not a point")
@@ -304,9 +298,14 @@ const sRGB = (c) => c <= 0.0031308 ? (12.92 * c) : (1.055 * Math.pow(c, 0.416666
                 return None
             
             lon, lat = coordinates
+            event_id = feature.get('properties', {}).get('id')
             
-            # Process the tiles
-            return self.find_and_process_tiles(lon, lat, target_date)
+            if not event_id:
+                logger.warning("No event ID found in feature properties")
+                return None
+            
+            # Process the tiles with event ID
+            return self.find_and_process_tiles(lon, lat, target_date, event_id)
             
         except Exception as e:
             logger.error(f"Error processing feature: {str(e)}", exc_info=True)

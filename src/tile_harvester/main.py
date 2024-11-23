@@ -7,11 +7,11 @@ from typing import Optional, List, Dict, Any
 from .services.geojson_service import GeoJSONService
 from .services.sentinel_service import SentinelService
 from .services.airtable_service import AirtableService
-from .config import DATA_DIR
+from .config import DATA_DIR, LOG_LEVEL
 
 # Set up logging with debug level
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=LOG_LEVEL,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)

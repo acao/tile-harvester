@@ -2,24 +2,30 @@
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List
-from airtable import Airtable
+from pyairtable import Api
+import logging
+import mimetypes
 import base64
 
 from ..config import (
-    AIRTABLE_API_KEY,
+    AIRTABLE_ACCESS_TOKEN,
     AIRTABLE_BASE_ID,
     AIRTABLE_TABLE_NAME
 )
+
+logger = logging.getLogger(__name__)
 
 class AirtableService:
     """Service for handling Airtable operations."""
 
     def __init__(self):
         """Initialize the Airtable service."""
-        if not all([AIRTABLE_API_KEY, AIRTABLE_BASE_ID]):
+        if not all([AIRTABLE_ACCESS_TOKEN, AIRTABLE_BASE_ID]):
             raise ValueError("Airtable credentials not found in environment")
         
-        self.table = Airtable(AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME, AIRTABLE_API_KEY)
+        self.api = Api(AIRTABLE_ACCESS_TOKEN)
+        self.table = self.api.table(AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
+        logger.info(f"Initialized AirtableService with base {AIRTABLE_BASE_ID}, table {AIRTABLE_TABLE_NAME}")
 
     def _prepare_record(
         self,
@@ -54,12 +60,8 @@ class AirtableService:
             'Original URL': properties.get('url'),
             'Geolocation URL': properties.get('geolocUrl'),
             'Status': properties.get('status', 'Pending Review'),
-            'Country': properties.get('country'),
             'Province': properties.get('province'),
             'City': properties.get('city'),
-            'Categories': ', '.join(properties.get('categories', [])),
-            'Violence Level': properties.get('violenceLevel'),
-            'Civilian Casualties': 'Yes' if properties.get('civCas') else 'No'
         }
         
         # Add Sentinel data
@@ -77,33 +79,56 @@ class AirtableService:
         
         return record
 
-    def _attach_image(self, record_id: str, image_path: Path, title: str) -> None:
+    def _attach_image(self, record_id: str, image_path: Path, event_id: str, date_str: str = None) -> None:
         """
         Attach an image to an Airtable record.
         
         Args:
             record_id: ID of the Airtable record
             image_path: Path to the image file
-            title: Title for the attachment
+            event_id: The UW prefixed ID from source data
+            date_str: Date string for the image (optional)
         """
+        logger.info(f"Attempting to attach image for record {record_id}")
+        logger.debug(f"Image path: {image_path}")
+        logger.debug(f"Event ID: {event_id}")
+
         if not image_path.exists():
-            print(f"Warning: Image file not found: {image_path}")
+            logger.error(f"Image file not found: {image_path}")
             return
+        
+        logger.info(f"Image file exists at {image_path}")
             
         try:
+            # Create filename using UW ID and date if available
+            if date_str:
+                filename = f"{event_id}_{date_str}.jpg"
+            else:
+                filename = f"{event_id}.jpg"
+            logger.debug(f"Generated filename: {filename}")
+
+            # Read the image file and encode it
             with open(image_path, 'rb') as file:
-                encoded_image = base64.b64encode(file.read()).decode('utf-8')
+                image_data = file.read()
+                encoded_image = base64.b64encode(image_data).decode('utf-8')
+
+            # Create the new attachment object according to Airtable's format
+            new_attachment = [{
+                'url': f'data:image/jpeg;base64,{encoded_image}',
+                'filename': filename
+            }]
+
+            # Update the record with the new attachment
+            # Note: We're not appending to existing attachments, but replacing them
+            # This avoids potential issues with attachment object format
+            self.table.update(record_id, {
+                'Satellite Imagery': new_attachment
+            })
                 
-                self.table.update(record_id, {
-                    'Satellite Imagery': [
-                        {
-                            'url': f'data:image/jpeg;base64,{encoded_image}',
-                            'filename': title
-                        }
-                    ]
-                })
+            logger.info(f"Successfully updated record with image")
+            
         except Exception as e:
-            print(f"Error attaching image {image_path}: {str(e)}")
+            logger.error(f"Error attaching image {image_path}: {str(e)}", exc_info=True)
 
     def create_record(
         self,
@@ -122,14 +147,40 @@ class AirtableService:
         Returns:
             ID of the created record
         """
-        # Prepare and create the record
-        record = self._prepare_record(feature, sentinel_data)
-        result = self.table.insert(record)
-        record_id = result['id']
+        # Get the UW ID from feature properties
+        event_id = feature.get('properties', {}).get('id', '')
+        logger.info(f"Creating record for event {event_id}")
         
-        # Attach images
-        for image_path, tile_data in zip(image_paths, sentinel_data):
-            title = f"Sentinel-2 {tile_data['date'].strftime('%Y-%m-%d')}"
-            self._attach_image(record_id, image_path, title)
+        # Log the lengths of our data
+        logger.info(f"Number of sentinel data entries: {len(sentinel_data) if sentinel_data else 0}")
+        logger.info(f"Number of image paths: {len(image_paths) if image_paths else 0}")
+        
+        # Prepare and create the record
+        record = self._prepare_record(feature, sentinel_data or [])
+        logger.debug(f"Prepared record: {record}")
+        
+        result = self.table.create(record)
+        record_id = result['id']
+        logger.info(f"Created record with ID: {record_id}")
+        
+        # Attach images if we have any
+        if image_paths:
+            logger.info(f"Attaching {len(image_paths)} images to record")
+            
+            # If we have sentinel data, use it for dates
+            if sentinel_data:
+                for i in range(min(len(image_paths), len(sentinel_data))):
+                    image_path = image_paths[i]
+                    tile_data = sentinel_data[i]
+                    date_str = tile_data['date'].strftime('%Y%m%d')
+                    logger.debug(f"Processing image {i+1}: {image_path} for date {date_str}")
+                    self._attach_image(record_id, image_path, event_id, date_str)
+            else:
+                # Just attach images without dates
+                for i, image_path in enumerate(image_paths):
+                    logger.debug(f"Processing image {i+1}: {image_path}")
+                    self._attach_image(record_id, image_path, event_id)
+        else:
+            logger.warning("No images to attach")
         
         return record_id
